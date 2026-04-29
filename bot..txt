@@ -1,0 +1,103 @@
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+import requests
+import urllib.parse
+import os
+
+# 🔐 ambil dari environment (BUKAN dalam code)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+API_URL = "https://router.huggingface.co/v1/chat/completions"
+
+headers = {
+    "Authorization": "Bearer " + HF_TOKEN,
+    "Content-Type": "application/json"
+}
+
+chat_history = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    chat_history[user_id] = []
+    await update.message.reply_text(
+        "Hi! Saya bot AI 🤖\n\n"
+        "✔️ Chat biasa\n"
+        "✔️ /img kucing\n"
+        "✔️ taip: bagi gambar kucing"
+    )
+
+def ask_ai(messages):
+    payload = {
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "messages": messages,
+        "max_tokens": 300
+    }
+
+    response = requests.post(API_URL, headers=headers, json=payload)
+
+    if response.status_code != 200:
+        return "HF Error: " + response.text
+
+    data = response.json()
+
+    try:
+        reply = data["choices"][0]["message"].get("content", "")
+    except:
+        reply = ""
+
+    if not reply or reply.strip() == "":
+        reply = "Maaf, AI tak dapat jawab."
+
+    return reply
+
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_text = update.message.text
+
+    # 🔥 detect gambar
+    if "gambar" in user_text.lower():
+        prompt = user_text.lower().replace("bagi gambar", "").replace("gambar", "").strip()
+        if prompt == "":
+            prompt = "kucing comel"
+
+        safe_prompt = urllib.parse.quote(prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{safe_prompt}"
+
+        await update.message.reply_photo(photo=image_url, caption="Gambar AI 🎨")
+        return
+
+    await update.message.reply_text("Tunggu jap... 🤔")
+
+    if user_id not in chat_history:
+        chat_history[user_id] = []
+
+    chat_history[user_id].append({"role": "user", "content": user_text})
+    messages = chat_history[user_id][-10:]
+
+    reply = ask_ai(messages)
+
+    chat_history[user_id].append({"role": "assistant", "content": reply})
+
+    await update.message.reply_text(reply[:4000])
+
+async def ai_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = " ".join(context.args)
+
+    if not prompt:
+        await update.message.reply_text("Guna: /img kucing comel")
+        return
+
+    safe_prompt = urllib.parse.quote(prompt)
+    image_url = f"https://image.pollinations.ai/prompt/{safe_prompt}"
+
+    await update.message.reply_photo(photo=image_url, caption="Gambar AI 🎨")
+
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("img", ai_image))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+
+print("Bot AI sedang jalan (Render)...")
+app.run_polling()
