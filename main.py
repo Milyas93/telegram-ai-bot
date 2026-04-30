@@ -1,5 +1,4 @@
 import os
-import urllib.parse
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -12,36 +11,33 @@ from telegram.ext import (
 )
 
 # =========================
-# 🔥 CONFIG (JANGAN LETAK TOKEN DALAM CODE)
+# CONFIG (RAILWAY)
 # =========================
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")   # 👉 isi di Railway
-HF_TOKEN = os.getenv("HF_TOKEN")               # 👉 isi di Railway
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))     # 👉 isi di Railway
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 
 # =========================
-# MENU KEDAI
+# DATA MENU
 # =========================
-SHOP = {
-    "name": "Kedai Nasi Ayam Pak Ali",
-    "menu": [
-        {"no": 1, "name": "Nasi Ayam", "price": 7.00, "image": "https://picsum.photos/400"},
-        {"no": 2, "name": "Nasi Lemak", "price": 6.00, "image": "https://picsum.photos/401"},
-        {"no": 3, "name": "Mee Goreng", "price": 5.00, "image": "https://picsum.photos/402"},
-    ]
-}
+MENU = [
+    {"name": "Nasi Ayam", "price": 7},
+    {"name": "Nasi Ayam Special", "price": 9},
+    {"name": "Ayam Crispy", "price": 8},
+    {"name": "Mee Goreng", "price": 6},
+    {"name": "Teh Ais", "price": 2.5},
+]
 
-chat_history = {}
-user_cart = {}
+cart = {}
 
 # =========================
 # AI FUNCTION
 # =========================
-def ask_ai(user_id, text):
+def ask_ai(text):
     if not HF_TOKEN:
-        return "AI belum setup. Taip menu dulu."
+        return "AI belum setup."
 
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
@@ -51,7 +47,7 @@ def ask_ai(user_id, text):
     payload = {
         "model": "Qwen/Qwen2.5-7B-Instruct",
         "messages": [
-            {"role": "system", "content": "Anda AI kedai makan. Jawab ringkas BM."},
+            {"role": "system", "content": "Anda AI kedai makan. Jawab BM dan bantu jual makanan."},
             {"role": "user", "content": text}
         ]
     }
@@ -61,50 +57,66 @@ def ask_ai(user_id, text):
         data = res.json()
         return data["choices"][0]["message"]["content"]
     except:
-        return "AI error. Taip menu."
+        return "AI error"
 
 # =========================
 # START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hi! 🤖\n"
-        "Taip 'menu' untuk order\n"
-        "/id untuk tengok ID"
+        "🔥 Selamat datang 🔥\n\n"
+        "👉 Taip 'menu' untuk tengok makanan\n"
+        "👉 Contoh order: 'nasi ayam 2'\n"
     )
 
 # =========================
-# GET ID
+# SHOW MENU
 # =========================
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID: {update.effective_chat.id}")
+async def show_menu(update):
+    text = "🍽 MENU HARI INI\n\n"
+    for i, item in enumerate(MENU, 1):
+        text += f"{i}. {item['name']} RM{item['price']}\n"
+
+    text += "\n👉 Taip nombor atau nama menu untuk order"
+
+    await update.message.reply_text(text)
 
 # =========================
-# MENU
+# ADD TO CART
 # =========================
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_cart[chat_id] = []
+def add_to_cart(user_id, item_name, qty=1):
+    if user_id not in cart:
+        cart[user_id] = []
 
-    for item in SHOP["menu"]:
-        keyboard = [[InlineKeyboardButton(
-            f"No {item['no']}",
-            callback_data=f"add_{item['no']}"
-        )]]
+    cart[user_id].append({"name": item_name, "qty": qty})
 
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=item["image"],
-            caption=f"{item['name']} RM{item['price']}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+# =========================
+# CHECKOUT
+# =========================
+async def checkout(update, user_id):
+    items = cart.get(user_id, [])
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="Checkout",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Checkout", callback_data="checkout")]]
-        )
+    if not items:
+        await update.message.reply_text("Cart kosong.")
+        return
+
+    text = "🧾 Order:\n\n"
+    total = 0
+
+    for item in items:
+        price = next(x["price"] for x in MENU if x["name"] == item["name"])
+        total += price * item["qty"]
+        text += f"- {item['name']} x{item['qty']}\n"
+
+    text += f"\nTotal: RM{total}"
+
+    keyboard = [
+        [InlineKeyboardButton("Confirm", callback_data="confirm")]
+    ]
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # =========================
@@ -114,67 +126,68 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    chat_id = q.message.chat.id
-    data = q.data
+    user_id = q.message.chat.id
 
-    if chat_id not in user_cart:
-        user_cart[chat_id] = []
+    items = cart.get(user_id, [])
+    total = 0
+    text = ""
 
-    if data.startswith("add_"):
-        no = int(data.replace("add_", ""))
-        item = next(x for x in SHOP["menu"] if x["no"] == no)
-        user_cart[chat_id].append(item)
+    for item in items:
+        price = next(x["price"] for x in MENU if x["name"] == item["name"])
+        total += price * item["qty"]
+        text += f"{item['name']} x{item['qty']}\n"
 
-        await q.message.reply_text(f"Tambah {item['name']}")
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=f"ORDER BARU\n{text}\nTotal RM{total}"
+    )
 
-    elif data == "checkout":
-        cart = user_cart[chat_id]
-
-        total = sum(x["price"] for x in cart)
-        text = "\n".join([x["name"] for x in cart])
-
-        await q.message.reply_text(
-            f"{text}\nTotal RM{total}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Confirm", callback_data="confirm")]
-            ])
-        )
-
-    elif data == "confirm":
-        cart = user_cart[chat_id]
-
-        text = "\n".join([x["name"] for x in cart])
-        total = sum(x["price"] for x in cart)
-
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=f"ORDER\n{text}\nTotal RM{total}"
-        )
-
-        await q.message.reply_text("Order hantar ✅")
-        user_cart[chat_id] = []
+    await q.message.reply_text("Order dihantar ✅")
+    cart[user_id] = []
 
 # =========================
-# CHAT (AI + MENU)
+# CHAT HANDLER (SMART)
 # =========================
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     text = update.message.text.lower()
 
-    if text in ["menu", "order"]:
-        await menu(update, context)
+    # buka menu
+    if "menu" in text:
+        await show_menu(update)
         return
 
-    reply = ask_ai(update.effective_user.id, update.message.text)
+    # checkout
+    if "checkout" in text:
+        await checkout(update, user_id)
+        return
+
+    # detect nombor
+    if text.isdigit():
+        index = int(text) - 1
+        if 0 <= index < len(MENU):
+            item = MENU[index]
+            add_to_cart(user_id, item["name"])
+            await update.message.reply_text(f"✅ {item['name']} masuk cart")
+            return
+
+    # detect AI order (simple)
+    for item in MENU:
+        if item["name"].lower() in text:
+            add_to_cart(user_id, item["name"])
+            await update.message.reply_text(f"✅ {item['name']} masuk cart")
+            return
+
+    # fallback AI
+    reply = ask_ai(text)
     await update.message.reply_text(reply)
 
 # =========================
 # MAIN
 # =========================
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("id", get_id))
-app.add_handler(CommandHandler("menu", menu))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
