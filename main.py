@@ -1,6 +1,8 @@
 import os
 import re
+import json
 import requests
+import mysql.connector
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,9 +13,6 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# CONFIG - ISI DI RAILWAY VARIABLES
-# =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -21,9 +20,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 AI_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
-# =========================
-# MENU
-# =========================
 MENU = [
     {"id": "nasi_ayam", "name": "Nasi Ayam", "price": 7.00, "aliases": ["nasi ayam", "ayam"]},
     {"id": "nasi_ayam_special", "name": "Nasi Ayam Special", "price": 9.00, "aliases": ["nasi ayam special", "special"]},
@@ -38,14 +34,68 @@ cart = {}
 chat_history = {}
 
 
-# =========================
-# AI
-# =========================
-def menu_text():
-    return "\n".join(
-        f"- {item['name']} RM{item['price']:.2f}"
-        for item in MENU
+def get_db():
+    return mysql.connector.connect(
+        host=os.getenv("MYSQLHOST"),
+        user=os.getenv("MYSQLUSER"),
+        password=os.getenv("MYSQLPASSWORD"),
+        database=os.getenv("MYSQLDATABASE"),
+        port=int(os.getenv("MYSQLPORT", "3306")),
     )
+
+
+def init_db():
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                customer_id BIGINT,
+                customer_name VARCHAR(255),
+                items JSON,
+                total DECIMAL(10,2),
+                status VARCHAR(50) DEFAULT 'new',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.commit()
+        cursor.close()
+        db.close()
+        print("Database ready.")
+    except Exception as e:
+        print("Database init error:", e)
+
+
+def save_order(customer_id, customer_name, items, total):
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            """
+            INSERT INTO orders (customer_id, customer_name, items, total, status)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                customer_id,
+                customer_name,
+                json.dumps(items),
+                total,
+                "new",
+            ),
+        )
+        db.commit()
+        order_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+        return order_id
+    except Exception as e:
+        print("Save order error:", e)
+        return None
+
+
+def menu_text():
+    return "\n".join(f"- {item['name']} RM{item['price']:.2f}" for item in MENU)
 
 
 def ask_ai(user_id, user_text):
@@ -94,10 +144,8 @@ Tugas:
             return "AI tengah busy. Taip 'menu' untuk order dulu."
 
         reply = data["choices"][0]["message"]["content"].strip()
-
         chat_history[user_id].append({"role": "user", "content": user_text})
         chat_history[user_id].append({"role": "assistant", "content": reply})
-
         return reply
 
     except Exception as e:
@@ -105,9 +153,6 @@ Tugas:
         return "AI error sekejap. Taip 'menu' untuk order dulu."
 
 
-# =========================
-# CART FUNCTIONS
-# =========================
 def get_user_cart(user_id):
     if user_id not in cart:
         cart[user_id] = {}
@@ -145,32 +190,7 @@ def cart_summary(user_id):
     return text, total
 
 
-def find_menu_item(text):
-    text = text.lower()
-
-    # cari nama paling panjang dulu supaya "nasi ayam special" tak kena detect sebagai "nasi ayam"
-    sorted_menu = sorted(
-        MENU,
-        key=lambda x: max(len(a) for a in x["aliases"]),
-        reverse=True,
-    )
-
-    for item in sorted_menu:
-        for alias in item["aliases"]:
-            if alias in text:
-                return item, alias
-
-    return None, None
-
-
 def parse_order_text(text):
-    """
-    Faham contoh:
-    - nasi ayam 3
-    - nasi ayam 3 teh ais 2
-    - nak 2 nasi ayam dan 1 milo
-    - nasi ayam special
-    """
     text = text.lower()
     found = []
 
@@ -196,12 +216,10 @@ def parse_order_text(text):
 
                 qty = 1
 
-                # pattern: "2 nasi ayam"
                 before_num = re.search(r"(\d+)\s*$", before)
                 if before_num:
                     qty = int(before_num.group(1))
 
-                # pattern: "nasi ayam 2"
                 after_num = re.search(r"^\s*(\d+)", after)
                 if after_num:
                     qty = int(after_num.group(1))
@@ -213,9 +231,6 @@ def parse_order_text(text):
     return found
 
 
-# =========================
-# TELEGRAM HANDLERS
-# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 Selamat datang ke Kedai AI 🔥\n\n"
@@ -224,7 +239,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• nasi ayam 2 teh ais 1\n"
         "• cart\n"
         "• checkout\n"
-        "• cancel"
+        "• cancel\n"
+        "• /id"
     )
 
 
@@ -235,7 +251,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {item['name']} — RM{item['price']:.2f}\n"
 
     text += "\nContoh order: nasi ayam 2 teh ais 1"
-
     await update.message.reply_text(text)
 
 
@@ -261,7 +276,7 @@ async def do_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Confirm ✅", callback_data="confirm_order")],
             [InlineKeyboardButton("Cancel ❌", callback_data="cancel_order")],
-        ])
+        ]),
     )
 
 
@@ -291,18 +306,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         customer_name = query.from_user.first_name or "Customer"
         customer_id = query.from_user.id
 
+        items_for_db = list(user_cart.values())
+        order_id = save_order(
+            customer_id=customer_id,
+            customer_name=customer_name,
+            items=items_for_db,
+            total=total,
+        )
+
+        order_label = f"#{order_id}" if order_id else "(DB gagal simpan)"
+
         await context.bot.send_message(
             chat_id=OWNER_ID,
             text=(
-                "ORDER BARU 🔔\n\n"
+                f"ORDER BARU {order_label} 🔔\n\n"
                 f"Customer: {customer_name}\n"
                 f"Telegram ID: {customer_id}\n\n"
                 f"{text}"
-            )
+            ),
         )
 
         cart[user_id] = {}
-        await query.message.reply_text("Order berjaya dihantar ✅")
+        await query.message.reply_text(f"Order berjaya dihantar ✅\nOrder ID: {order_label}")
         return
 
 
@@ -328,7 +353,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Cart dikosongkan ✅")
         return
 
-    # order guna nombor menu: "1" atau "1 2"
     if re.fullmatch(r"[\d\s]+", low):
         nums = [int(x) for x in low.split() if x.isdigit()]
         added = []
@@ -343,7 +367,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(added) + "\n\nTaip cart atau checkout.")
             return
 
-    # order guna ayat
     parsed_items = parse_order_text(low)
 
     if parsed_items:
@@ -356,17 +379,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines) + "\n\nTaip cart atau checkout.")
         return
 
-    # fallback AI
     reply = ask_ai(user_id, text)
     await update.message.reply_text(reply[:4000])
 
 
-# =========================
-# MAIN
-# =========================
 def main():
     if not TOKEN:
         raise ValueError("TELEGRAM_TOKEN belum set di Railway Variables.")
+
+    init_db()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -376,7 +397,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-    print("Bot Level 2 running...")
+    print("Bot database version running...")
     app.run_polling()
 
 
